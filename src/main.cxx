@@ -24,8 +24,10 @@ int main()
 	try {
 		// данные на вход
 		auto in = open<std::ifstream>("in.txt");
+#ifndef _DEBUG
 		// результаты программы на выход
 		auto out = open<std::ofstream>("out.txt", std::ios::trunc);
+#endif
 
 		// инициализируем ФС
 		auto program = fs::Program(in);
