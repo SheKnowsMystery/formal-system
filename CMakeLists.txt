@@ -59,5 +59,5 @@ install(
 
 install(
 	DIRECTORY data/
-	DESTINATION bin/
+	DESTINATION bin
 )

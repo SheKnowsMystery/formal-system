@@ -1,24 +1,25 @@
 module;
 
 #include <type_traits>
-#include <functional>
-#include <iterator>
 #include <concepts>
-#include <ranges>
+#include <cstddef>
+
+#include <stdexcept>
+#include <format>
 
 #include <string_view>
 #include <string>
 #include <regex>
 
-#include <stdexcept>
-#include <format>
-
 #include <istream>
 #include <iomanip>
 
+#include <functional>
 #include <algorithm>
 #include <numeric>
 
+#include <iterator>
+#include <ranges>
 #include <vector>
 #include <set>
 #include <map>
@@ -30,7 +31,7 @@ export
 namespace fs::util {
 	// концепт для проверки правильности типа
 	template <typename _Type>
-	concept extendable_container =
+	concept expandable_container =
 		std::ranges::range<_Type> &&
 		requires(_Type _obj, std::ranges::range_value_t<_Type> _val) { _obj.insert(_obj.end(), _val); };
 	// концепт для проверки правильности типа
@@ -42,7 +43,7 @@ namespace fs::util {
 	// концепт для проверки правильности типа
 	template <typename _Type, typename... _Types>
 	concept constructible_from_any_of = (std::constructible_from<_Type, _Types> || ...);
-	// получаем
+	// функция для получения строки из потока
 	auto getline(std::istream& _is, char _delim = '\n') -> std::string {
 		std::string line;
 		std::getline(_is, line, _delim);
@@ -57,6 +58,8 @@ namespace fs::util {
 			Base(std::format("{0}\n{1}\n{3:>{2}}", _msg, _text, _index + 1, '^')) {};
 		failure(std::string_view _msg, std::string_view _text) :
 			Base(std::format("{0}\n{1}\n{3:^>{2}}", _msg, _text, _text.size(), '^')) {};
+		failure(std::string_view _msg, char _text) :
+			Base(std::format("{0}\n{1}\n^", _msg, _text)) {};
 	};
 }
 
@@ -84,7 +87,7 @@ namespace fs::impl {
 	}
 
 	// функция которая возвращает контейнер, заполненный в результатами парсинга
-	template <util::extendable_container _Container>
+	template <util::expandable_container _Container>
 		requires(!std::same_as<_Container, std::string>)
 	auto parse(const std::string& _raw) {
 		// контейнер, в который будет помещаться результат парсинга
@@ -136,7 +139,7 @@ namespace fs::impl {
 		return str;
 	}
 	// функция, которая парсит строку по разделителю ';' и возвращает заполненный результатом контейнер
-	template <util::extendable_container _Container>
+	template <util::expandable_container _Container>
 	auto parse(std::istream& _is) -> _Container
 	{ return parse<_Container>(util::getline(_is, ';')); }
 }
@@ -150,10 +153,10 @@ namespace fs {
 		// синонимы типов для удобной работы
 		using symbol_t    = char;
 		using alphabet_t  = std::set<symbol_t>;
-		using word_t      = std::basic_string<char>;
+		using word_t      = std::basic_string<symbol_t>;
 		using variable_t  = symbol_t;
 		using variables_t = std::map<variable_t, word_t>;
-		using axioms_t    = std::set<word_t>;
+		using axioms_t    = std::set<symbol_t>;
 		using rule_t      = Rule;
 		using rules_t     = std::vector<rule_t>;
 		// структура для хранения правил в удобном формате
@@ -165,19 +168,25 @@ namespace fs {
 				word_t raw; // сырая строка части
 				std::regex regex; // регулярное выражение части
 			} condition, replacement;
+			std::size_t varc = 0;
 			std::map<std::size_t, variable_t> variables; // список
 			// конструктор правила из сырой строки
 			Rule(const word_t& _raw) : raw(_raw) {
 				// регулярное выражение, которое определяет вид правила
-				const auto regex = std::regex(R"((\S*)->(\S*))");
+				static const auto regex = std::regex(R"((\S*)->(\S*))");
 				// захват-группа для частей правила
 				auto capture = std::smatch();
 				// проверяем, подходит ли правило под регулярное выражение, и присваиваем частям правила их строки, иначе выбрасываем исключение
 				if (std::regex_search(_raw, capture, regex) && capture.size() == 3) {
-					condition.str   = condition.raw   = capture[1].str();
-					replacement.str = replacement.raw = capture[2].str();
+					condition.str   = escape(condition.raw   = capture[1].str());
+					replacement.str = escape(replacement.raw = capture[2].str());
 				}
 				else throw util::failure("Invalid rule structure", raw);
+			}
+			// функция, добавляющая перед всеми специальными символами '\', чтобы они не влияли на регулярное выражение
+			static auto escape(const word_t& _raw) -> word_t {
+				static const auto special = std::regex(R"(\W)");
+				return std::regex_replace(_raw, special, "\\$&");
 			}
 			// функция, возвращающая индекс переменной в части
 			static auto find(Part& _part, variable_t _var) -> std::size_t {
@@ -198,28 +207,31 @@ namespace fs {
 				// заменяем первую переменную на регулярное выражение списка аксиом
 				result = std::regex_replace(result, var, _axiom_str, std::regex_constants::format_first_only);
 				// повторы переменной заменяем на индекс переменной, чтобы при поиске регулярного выражения захват-группа была одинаковой для одинаковых переменных
-				result = std::regex_replace(result, var, "\\" + std::to_string(_id));
+				result = std::regex_replace(result, var, '\\' + std::to_string(_id));
 				// присваиваем полученное регулярное выражение
 				_part.regex = _part.str = result;
 				// возвращаем были ли замены переменных или нет
 				return varc < _part.regex.mark_count();
 			}
 			// функция установки регулярного выражения для правила, с помощью подстановки списка аксиом вместо переменных
-			void set(variable_t _var, std::size_t _id, const word_t& _axiom_str) {
+			void set(variable_t _var, const word_t& _axiom_str) {
 				// вспомогательная структура, которая отслеживает, где в правиле была найдена переменная
 				struct {
 					bool condition   = false;
 					bool replacement = false;
 				} add;
+				std::size_t id = varc + 1;
 				// создаём регулярные выражения
-				add.condition   |= set(condition, _var, _id, _axiom_str);
-				add.replacement |= set(replacement, _var, _id, _axiom_str);
+				add.condition   |= set(condition, _var, id, _axiom_str);
+				add.replacement |= set(replacement, _var, id, _axiom_str);
 				// если переменная найдена в замене, но не найдена в условии - правило некорректно
 				if (!add.condition && add.replacement)
 					throw util::failure("Invalid replacement in the rule", raw, condition.raw.size() + 1 + find(replacement, _var));
 				// если переменная найдена в условии, добавляем её в список переменных этого правила
-				if (add.condition)
-					variables[_id] = _var;
+				if (!add.condition)
+					return;
+				variables[id] = _var;
+				varc++;
 			}
 		};
 		// данные программы
@@ -235,6 +247,12 @@ namespace fs {
 		// функция, возвращающая лямбду для проверки символа на наличие в алфавите и списке переменных
 		auto correct_v() const
 		{ return [this](symbol_t _sym) -> bool { return alphabet.contains(_sym) || variables.contains(_sym); }; }
+		// функция для проверки символа на наличие в алфавите
+		auto correct(symbol_t _sym) const
+		{ return alphabet.contains(_sym); }
+		// функция для проверки символа на наличие в алфавите и списке переменных
+		auto correct_v(symbol_t _sym) const
+		{ return alphabet.contains(_sym) || variables.contains(_sym); }
 		// функция верификации выражения для проверки наличия всех символов выражения в алфавите
 		bool correct(const word_t& _word) const
 		{ return std::ranges::all_of(_word, correct()); }
@@ -273,20 +291,17 @@ namespace fs {
 				if (!verify(rule))
 					throw util::failure("Invalid symbol in the rule", rule.raw, incorrect(rule));
 			// проверяем аксиомы на корректность
-			for (const word_t& axiom : axioms)
+			for (const auto& axiom : axioms)
 				if (!correct(axiom))
-					throw util::failure("Invalid symbol in the axiom", axiom, incorrect(axiom));
+					throw util::failure("Invalid symbol in the axiom list", axiom);
 			// создаём регулярное выражение для аксиом
 			auto axiom_str = word_t();
 			axiom_str = std::accumulate(axioms.begin(), axioms.end(), word_t());
 			axiom_str = "([" + axiom_str + "]+)";
 			// создаём регулярные выражения для правил
-			std::size_t i = 1;
-			for (auto& [variable, value] : variables) {
+			for (auto& [variable, value] : variables)
 				for (auto& rule : rules)
-					rule.set(variable, i, axiom_str);
-				i++;
-			}
+					rule.set(variable, axiom_str);
 			// проверяем выражение на корректность
 			if (!verify(expression))
 				throw util::failure("Invalid symbol in the expression", expression, incorrect(expression));
@@ -299,7 +314,7 @@ namespace fs {
 			for (const auto& rule : rules)
 				if (std::regex_search(_expression, rule.condition.regex))
 					return result = &rule;
-			// возвращаем найденное (или не найденное) правило
+			// возвращаем найденное правило или пустой указатель
 			return result;
 		}
 		// функция замены в выражении по найденному правилу
